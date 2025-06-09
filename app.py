@@ -414,21 +414,6 @@ def show_chat_interface():
     
     st.markdown("---")
     
-    # Show selected use case info in sidebar (condensed version)
-    with st.sidebar:
-        st.markdown("### Search Options")
-        gov_sg_search = st.checkbox("Gov SG Search", value=True, help="Search within Singapore government domains (gov.sg)")
-        global_search = st.checkbox("Global Search", value=False, help="Search across all web sources globally")
-    
-    # Determine search type and if web search is enabled
-    use_web_search = gov_sg_search or global_search
-    if gov_sg_search and global_search:
-        search_type = "both"
-    elif global_search:
-        search_type = "real_time"
-    else:
-        search_type = "enhanced"
-    
     # Show input guidance
     st.markdown("**💡 How it works:** Your input will be appended to the use case instruction above when processing your request.")
     
@@ -464,6 +449,25 @@ def show_chat_interface():
         else:
             clear_button = st.button("🗑️ Clear Chat", use_container_width=True, type="secondary")
             send_button = False  # Ensure send_button is False when locked
+            # Search Options (moved from sidebar)
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.markdown('<div style="display: flex; align-items: center; height: 38px;"><strong>Search Options:</strong></div>', unsafe_allow_html=True)
+    with col2:
+        gov_sg_search = st.checkbox("Gov SG Search", value=True, help="Search within Singapore government domains (gov.sg)")
+    with col3:
+        global_search = st.checkbox("Global Search", value=False, help="Search across all web sources globally")
+
+    
+    # Determine search type and if web search is enabled
+    use_web_search = gov_sg_search or global_search
+    if gov_sg_search and global_search:
+        search_type = "both"
+    elif global_search:
+        search_type = "real_time"
+    else:
+        search_type = "enhanced"
     
     # Create a container for chat messages
     chat_container = st.container(height=500)
