@@ -111,6 +111,157 @@ def load_prompts():
     except FileNotFoundError:
         return []
 
+async def generate_response_stream(prompt: str, user_input: str, use_web_search: bool = False, search_type: str = "enhanced"):
+    """Generate streaming response using the prompt template with OpenAI client"""
+    # Append user input to the instruction prompt
+    filled_prompt = f"{prompt}\n\nUser Input:\n{user_input}"
+    
+    try:
+        # Initialize OpenAI client
+        try:
+            openai_client = OpenAIClient()
+        except ValueError as e:
+            yield f"OpenAI client configuration error: {str(e)}. Please check your API key configuration."
+            return
+        
+        # Prepare messages for the chat completion
+        messages = [
+            {"role": "system", "content": "You are a helpful assistant that follows the given instructions carefully."},
+            {"role": "user", "content": filled_prompt}
+        ]
+        
+        citations = []
+        web_search_used = False
+        
+        if use_web_search:
+            web_search_used = True
+            try:
+                # Initialize Perplexity client for all search types
+                perplexity_client = PerplexityClient()
+                
+                if search_type == "both":
+                    # Execute both searches and merge results
+                    global_search_result = await perplexity_client.search_async(
+                        query=user_input,
+                        search_context_size="high",
+                        search_domain_filter=None  # No domain filter for broader search
+                    )
+                    
+                    gov_search_result = await perplexity_client.search_async(
+                        query=user_input,
+                        search_context_size="high",
+                        search_domain_filter=["gov.sg"]
+                    )
+                    
+                    # Merge search contexts
+                    combined_context = ""
+                    if global_search_result.get('content'):
+                        combined_context += f"\n\nGlobal Web Search Context:\n{global_search_result['content']}"
+                    if gov_search_result.get('content'):
+                        combined_context += f"\n\nSingapore Government Context:\n{gov_search_result['content']}"
+                    
+                    if combined_context:
+                        messages.append({"role": "user", "content": f"Additional context from multiple sources: {combined_context}"})
+                    
+                    # Merge citations from both searches
+                    citations = []
+                    citation_counter = 1
+                    
+                    # Add global search citations
+                    if global_search_result.get('citations'):
+                        for cite in global_search_result['citations']:
+                            citations.append({
+                                'docname': cite.get('title', f"Global Source {citation_counter}"),
+                                'docurl': cite.get('url', ''),
+                                'domain': cite.get('domain', ''),
+                                'source_type': 'Global'
+                            })
+                            citation_counter += 1
+                    
+                    # Add government search citations
+                    if gov_search_result.get('citations'):
+                        for cite in gov_search_result['citations']:
+                            citations.append({
+                                'docname': cite.get('title', f"Gov.sg Source {citation_counter}"),
+                                'docurl': cite.get('url', ''),
+                                'domain': cite.get('domain', ''),
+                                'source_type': 'Singapore Government'
+                            })
+                            citation_counter += 1
+                
+                elif search_type == "real_time":
+                    # Use Perplexity search with no domain filter for global real-time search
+                    search_result = await perplexity_client.search_async(
+                        query=user_input,
+                        search_context_size="high",
+                        search_domain_filter=None  # No domain filter for broader search
+                    )
+                    
+                    # Add web search context to messages
+                    if search_result.get('content'):
+                        web_context = f"\n\nGlobal Web Search Context:\n{search_result['content']}"
+                        messages.append({"role": "user", "content": f"Additional context from global web search: {web_context}"})
+                        
+                        # Extract citations from Perplexity response
+                        if search_result.get('citations'):
+                            citations = [
+                                {
+                                    'docname': cite.get('title', f"Source {i}"),
+                                    'docurl': cite.get('url', ''),
+                                    'domain': cite.get('domain', ''),
+                                    'source_type': 'Global'
+                                }
+                                for i, cite in enumerate(search_result['citations'], 1)
+                            ]
+                
+                else:
+                    # Use Perplexity search with gov.sg domain filter for Singapore government focused search
+                    search_result = await perplexity_client.search_async(
+                        query=user_input,
+                        search_context_size="high",
+                        search_domain_filter=["gov.sg"]
+                    )
+                    
+                    # Add web search context to messages
+                    if search_result.get('content'):
+                        web_context = f"\n\nSingapore Government Context:\n{search_result['content']}"
+                        messages.append({"role": "user", "content": f"Additional context from Singapore government sources: {web_context}"})
+                        
+                        # Extract citations from Perplexity response
+                        if search_result.get('citations'):
+                            citations = [
+                                {
+                                    'docname': cite.get('title', f"Source {i}"),
+                                    'docurl': cite.get('url', ''),
+                                    'domain': cite.get('domain', ''),
+                                    'source_type': 'Singapore Government'
+                                }
+                                for i, cite in enumerate(search_result['citations'], 1)
+                            ]
+                        
+            except Exception as e:
+                # Add error context but continue with the request
+                error_msg = f"Web search encountered an error: {str(e)}"
+                messages.append({"role": "user", "content": f"Note: {error_msg}"})
+        
+        # Get streaming chat completion from OpenAI
+        async for chunk in openai_client.get_chat_completion_stream_async(
+            messages=messages,
+            max_tokens=3000,
+            temperature=0.7
+        ):
+            yield chunk
+        
+        # Yield citations and metadata at the end
+        yield {
+            "citations": citations,
+            "web_search_used": web_search_used,
+            "search_type": search_type if use_web_search else None
+        }
+        
+    except Exception as e:
+        yield f"Sorry, I encountered an error while generating the response: {str(e)}"
+
 async def generate_response(prompt: str, user_input: str, use_web_search: bool = False, search_type: str = "enhanced", stream: bool = False) -> Dict[str, Any]:
     """Generate response using the prompt template with OpenAI client"""
     # Append user input to the instruction prompt
@@ -528,67 +679,136 @@ def show_chat_interface():
     
     # Process input when send button is clicked or chat input is used
     if (send_button and prompt.strip()) or chat_input:
-            # Determine which input to use
-            input_text = chat_input if chat_input else prompt
+        # Determine which input to use
+        input_text = chat_input if chat_input else prompt
+        
+        # Add user message to chat history immediately for better UX
+        user_message = {
+            'timestamp': datetime.now(),
+            'use_case': use_case['use_case.title'],
+            'input': input_text,
+            'response': "",
+            'citations': [],
+            'web_search_enabled': use_web_search,
+            'search_type': search_type if use_web_search else None
+        }
+        
+        # Show user message immediately
+        with chat_container:
+            with st.chat_message("user"):
+                st.markdown(input_text)
+                st.caption(f"🕒 {datetime.now().strftime('%H:%M:%S')}")
+        
+        # Generate streaming response
+        with st.status("Generating response...", expanded=True) as status:
+            st.write("🤖 Processing your request...")
+            if use_web_search:
+                if search_type == "both":
+                    st.write("🔍 Searching both global sources and Singapore government sources...")
+                elif search_type == "real_time":
+                    st.write("🔍 Searching global sources...")
+                else:
+                    st.write("🔍 Searching Singapore government sources...")
+            st.write("✍️ Generating response...")
             
-            # Add user message to chat history immediately for better UX
-            user_message = {
-                'timestamp': datetime.now(),
-                'use_case': use_case['use_case.title'],
-                'input': input_text,
-                'response': "",
-                'citations': [],
-                'web_search_enabled': use_web_search,
-                'search_type': search_type if use_web_search else None
-            }
-            
-            # Show user message immediately
-            with chat_container:
-                with st.chat_message("user"):
-                    st.markdown(input_text)
-                    st.caption(f"🕒 {datetime.now().strftime('%H:%M:%S')}")
-            
-            # Generate response
-            with st.status("Generating response...", expanded=True) as status:
-                st.write("🤖 Processing your request...")
-                if use_web_search:
-                    if search_type == "both":
-                        st.write("🔍 Searching both global sources and Singapore government sources...")
-                    elif search_type == "real_time":
-                        st.write("🔍 Searching global sources...")
-                    else:
-                        st.write("🔍 Searching Singapore government sources...")
-                st.write("✍️ Generating response...")
-                
-                try:
-                    response_data = asyncio.run(generate_response(
+            try:
+                # Create an async generator wrapper for streamlit
+                async def response_generator():
+                    full_response = ""
+                    citations = []
+                    web_search_used = use_web_search
+                    
+                    async for chunk in generate_response_stream(
                         use_case['use_case.instruction'], 
                         input_text, 
                         use_web_search,
                         search_type
-                    ))
+                    ):
+                        if isinstance(chunk, dict):
+                            # This is metadata (citations, etc.)
+                            citations = chunk.get('citations', [])
+                            web_search_used = chunk.get('web_search_used', use_web_search)
+                        else:
+                            # This is a text chunk
+                            full_response += chunk
+                            yield chunk
                     
-                    # Update the user message with response data
+                    # Store the final response data
                     user_message.update({
-                        'response': response_data['response'],
-                        'citations': response_data['citations'],
-                        'web_search_enabled': response_data['web_search_used']
+                        'response': full_response,
+                        'citations': citations,
+                        'web_search_enabled': web_search_used
                     })
-                    
-                    status.update(label="✅ Response generated!", state="complete")
-                    
-                except Exception as e:
-                    user_message['response'] = f"Sorry, I encountered an error: {str(e)}"
-                    status.update(label="❌ Error occurred", state="error")
                 
-                # Add to chat history
-                st.session_state.chat_history.append(user_message)
+                # Convert async generator to sync for streamlit
+                def sync_generator():
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    try:
+                        async_gen = response_generator()
+                        while True:
+                            try:
+                                chunk = loop.run_until_complete(async_gen.__anext__())
+                                yield chunk
+                            except StopAsyncIteration:
+                                break
+                    finally:
+                        loop.close()
+                
+                status.update(label="✍️ Streaming response...", state="running")
+                
+                # Show assistant message with streaming
+                with chat_container:
+                    with st.chat_message("assistant"):
+                        # Use st.write_stream for typewriter effect
+                        full_response = st.write_stream(sync_generator())
+                        
+                        # Update the stored response
+                        user_message['response'] = full_response
+                        
+                        # Show web search info and citations after streaming is complete
+                        if user_message.get('web_search_enabled'):
+                            search_mode = user_message.get('search_type', 'enhanced')
+                            if search_mode == "both":
+                                search_icon = "🌐🇸🇬"
+                                search_text = "both global and Singapore government sources"
+                            elif search_mode == "real_time":
+                                search_icon = "🌐"
+                                search_text = "global sources"
+                            else:
+                                search_icon = "🇸🇬"
+                                search_text = "Singapore government sources"
+                            
+                            st.info(f"{search_icon} Web search was enabled using {search_text}")
+                            
+                            # Show citations if available
+                            if user_message.get('citations'):
+                                with st.expander("📚 Citations & Sources"):
+                                    for j, citation in enumerate(user_message['citations'], 1):
+                                        source_type_badge = ""
+                                        if citation.get('source_type'):
+                                            if citation['source_type'] == 'Global':
+                                                source_type_badge = " 🌐"
+                                            elif citation['source_type'] == 'Singapore Government':
+                                                source_type_badge = " 🇸🇬"
+                                        
+                                        if citation['docurl']:
+                                            st.markdown(f"{source_type_badge} **[{j}]** [{citation['docurl']}]({citation['docurl']})\n\n")
+                
+                status.update(label="✅ Response generated!", state="complete")
+                
+            except Exception as e:
+                user_message['response'] = f"Sorry, I encountered an error: {str(e)}"
+                status.update(label="❌ Error occurred", state="error")
             
-            # Clear the input text after sending
-            st.session_state.input_text = prefill_text
-            
-            # Rerun to show the new message
-            st.rerun()
+            # Add to chat history
+            st.session_state.chat_history.append(user_message)
+        
+        # Clear the input text after sending
+        st.session_state.input_text = prefill_text
+        
+        # Rerun to show the new message
+        st.rerun()
 
 if __name__ == "__main__":
     main() 
